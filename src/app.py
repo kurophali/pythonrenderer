@@ -2,9 +2,9 @@ import cv2
 import torch
 import time
 
-DEBUG = True
-SCREEN_WIDTH = 16
-SCREEN_HEIGHT = 9
+DEBUG = False
+SCREEN_WIDTH = 480
+SCREEN_HEIGHT = 270
 
 class Renderer:
     def __init__(self, width, height) -> None:
@@ -59,7 +59,7 @@ class Renderer:
             print(has_pos.numpy())
             print('================== inside ==================')
             print(is_in_triangle.numpy())
-            
+                
         return is_in_triangle
     
     def rasterize_unoptimized(self, triangle: torch.Tensor):
@@ -70,17 +70,18 @@ class Renderer:
         v0s = self.screen_coords[:,:,:2] - self.triangle[0,:2]
         v1s = self.screen_coords[:,:,:2] - self.triangle[1,:2]
         v2s = self.screen_coords[:,:,:2] - self.triangle[2,:2]
-        v01_area_x2 = torch.abs(torch.det(torch.cat((v0s, v1s), 1).reshape(SCREEN_WIDTH, SCREEN_HEIGHT, 2, 2)))
-        v02_area_x2 = torch.abs(torch.det(torch.cat((v0s, v2s), 1).reshape(SCREEN_WIDTH, SCREEN_HEIGHT, 2, 2)))
-        v12_area_x2 = torch.abs(torch.det(torch.cat((v1s, v2s), 1).reshape(SCREEN_WIDTH, SCREEN_HEIGHT, 2, 2)))
-        outside = v01_area_x2 + v02_area_x2 + v12_area_x2 - triangle_area_x2
-        # outside = torch.clamp(torch.sign(outside), 0, 1)
+        v01_area_x2 = torch.abs(torch.det(torch.cat((v0s, v1s), 2).reshape(SCREEN_HEIGHT, SCREEN_WIDTH, 2, 2)))
+        v02_area_x2 = torch.abs(torch.det(torch.cat((v0s, v2s), 2).reshape(SCREEN_HEIGHT, SCREEN_WIDTH, 2, 2)))
+        v12_area_x2 = torch.abs(torch.det(torch.cat((v1s, v2s), 2).reshape(SCREEN_HEIGHT, SCREEN_WIDTH, 2, 2)))
+        summed_triangle_areas = v01_area_x2 + v02_area_x2 + v12_area_x2
+        outside = summed_triangle_areas - triangle_area_x2 - 1e-6
+        outside = torch.clamp(torch.sign(outside), 0, 1)
         # W.I.P......
         if DEBUG:
             print('================== outside ==================')
             print(outside.numpy())
-            print('================== triangle_area_x2 ==================')
-            print(v2s.numpy())
+            # print('================== triangle_area_x2 ==================')
+            # print(summed_triangle_areas.numpy())
         return 1 - outside
 
 
@@ -89,7 +90,7 @@ class Renderer:
 
         # self.screen_buffer[:,:,:] = self.screen_coords
         rasterized = self.rasterize_unoptimized(self.triangle)
-
+        self.screen_buffer[:,:,0] = rasterized
         return self.screen_buffer.numpy()
 
 
