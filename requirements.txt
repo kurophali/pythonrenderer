@@ -1,0 +1,2 @@
+torch-gpu
+opencv-python
