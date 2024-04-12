@@ -29,7 +29,7 @@ if __name__ == '__main__':
         is_inside, attributes = renderer.rasterize(scene.positions[0], scene.colors[0])
 
         # act as fragment shader
-        renderer.screen_buffer = is_inside * attributes
+        renderer.screen_buffer = is_inside.unsqueeze(-1) * attributes
 
         # display color and add fps
         color_buffer = renderer.get_buffer()

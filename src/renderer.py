@@ -45,6 +45,7 @@ class Renderer:
         # calculate triangle area vs point-corner area
         # if equal then we're inside
         # triangle_area_x2= torch.abs(torch.det(torch.cat((triangle[0:2, 0:2], triangle[1:3, 0:2])).reshape(3,2,2)))
+        attribute_size = attributes.shape[-1]
         triangle_area_x2 = torch.abs(torch.det(positions[0:2, 0:2] - positions[1:3, 0:2]))
         v0s = self.screen_coords[:,:,:2] - positions[0,:2]
         v1s = self.screen_coords[:,:,:2] - positions[1,:2]
@@ -58,9 +59,9 @@ class Renderer:
 
         # unsqueeze(-1) to make (x,y) shaped to (x,y,1)
         areas = torch.cat((v01_area_x2.unsqueeze(-1), v02_area_x2.unsqueeze(-1), v12_area_x2.unsqueeze(-1)), 2)
-        areas = torch.permute(areas, (2,0,1))
+        areas = torch.permute(areas, (2,0,1)).reshape(3, -1)
         total_area = triangle_area_x2
-        interpolated_attributes = torch.matmul(attributes.T, areas)
+        interpolated_attributes = torch.matmul(attributes.T, areas).reshape(attribute_size, constants.SCREEN_HEIGHT, constants.SCREEN_WIDTH).permute(1,2,0)
         interpolated_attributes = interpolated_attributes / total_area
 
         if constants.DEBUG:
