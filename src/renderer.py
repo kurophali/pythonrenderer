@@ -19,7 +19,12 @@ class Renderer:
         self.screen_coords = torch.full((height, width, 3), 1.0)
         self.texel_size_x = 1 / width
         self.texel_size_y = 1 / height 
+        self.screen_vertical_size = 1
+        self.screen_unit_size = self.screen_vertical_size / self.height
+        # w.i.p. may need to adjust for odd and even sizes
+        
 
+        self.rays = torch.full((height, width, 3), 1.0)
         for height_idx in range(len(self.screen_coords)):
             for width_idx in range(len(self.screen_coords[0])):
                 self.screen_coords[height_idx, width_idx, 0] = self.texel_size_x * (width_idx + 1)
@@ -35,14 +40,13 @@ class Renderer:
 
         
         # self.vertices = [(0.5, 1, 0.1), (1, 0, 0.1), (0, 0, 0.1)]
-
-    def format_vertex_input(self, input_format: dict):
-        # re-format the input so we dont need hashing
-        self.vertex_input_formatter = []
-        for input_name, num_count in input_format:
-            self.vertex_input_formatter.append(num_count)
             
-    def rasterize(self, positions: torch.Tensor, attributes: torch.Tensor, rasterization_id: Optional[int] = -1):
+    def rasterize_screen(self, positions: torch.Tensor, attributes: torch.Tensor, rasterization_id: Optional[int] = -1):
+        ''' 
+        positions : (3,3) as (vertex_count, dim_count)
+        attributes : (3, n) as (vertex_count, attribute_count)
+        rasterizing is rather slow if i'm only using matmuls. can't think of a way to reduce overdraw 
+        '''
         # calculate triangle area vs point-corner area
         # if equal then we're inside
         # triangle_area_x2= torch.abs(torch.det(torch.cat((triangle[0:2, 0:2], triangle[1:3, 0:2])).reshape(3,2,2)))
@@ -76,12 +80,49 @@ class Renderer:
         depth = interpolated_attributes[:,:,0].unsqueeze(-1)
         screen_depth = self.screen_coords[:,:,2].unsqueeze(-1)
         can_draw = torch.clamp(torch.sign(depth - screen_depth), 0, 1) * is_inside # draws closer one a.k.a larger depth so no need to 1 - tensor
-        alpha = interpolated_attributes[:,:,4].unsqueeze(-1)
+        # alpha = interpolated_attributes[:,:,4].unsqueeze(-1)
         # didnt know why alpha didnt work. but don't need to blend alpha right now anyway
         # self.screen_buffer = can_draw * alpha * interpolated_attributes[:,:,1:4] + (1-can_draw) * (1-alpha) * self.screen_buffer
+
+        # w.i.p. dynamic indexing might work but got errors. 
+        # draw_mask = (can_draw > 0).reshape((constants.SCREEN_HEIGHT, constants.SCREEN_WIDTH))
+        # self.screen_buffer[draw_mask] = interpolated_attributes[:,:,1:4]
+
         self.screen_buffer = can_draw * interpolated_attributes[:,:,1:4] + (1-can_draw) * self.screen_buffer
         self.screen_coords[:,:,2] = (can_draw * depth + (1-can_draw) * screen_depth).reshape((constants.SCREEN_HEIGHT, constants.SCREEN_WIDTH))
         return (is_inside, interpolated_attributes[:,:,0], interpolated_attributes[:,:,1:])         
+
+    def path_trace(self, position_batches: torch.Tensor, attribute_batches: torch.Tensor, 
+                 camera_position: torch.Tensor, camera_front: torch.Tensor, camera_right: torch.Tensor, camera_up: torch.Tensor,
+                 batch_id: Optional[int] = -1, near_plane_distance = 0.1):
+        '''
+        solution comes from this blog 
+        https://www.scratchapixel.com/lessons/3d-basic-rendering/ray-tracing-rendering-a-triangle/ray-triangle-intersection-geometric-solution.html
+        assumes the vertical length of the screen is 1
+        position_batches: (triangle_count, vertex_count, dim_count)
+        attribute_batches: (triangle_count, vertex_count, attribute_count)
+        '''
+        v0s = position_batches[:,0,:]
+        v1s = position_batches[:,1,:]
+        v2s = position_batches[:,2,:]
+        v01s = (v1s - v0s).permute((0,2,1))
+        v02s = (v2s - v0s).permute((0,2,1))
+        normals = torch.cross(v01s, v02s) # (triangle_count, 3)
+        triangle_count = normals.shape[0]
+        # t is stored in (screen_height, screen_width, triangle_count, 1)
+        # w.i.p some constants can be moved to initialzer functions
+        ray_offsets = self.screen_coords - 0.5
+        # ??? this cartesian dot product should show you something
+        self.rays = camera_front + camera_up * ray_offsets[0] + camera_right * ray_offsets[1] # (height, width, 3)
+        NdotR = self.rays[:,:,None,:]
+        NdotR = NdotR.expand(-1, -1, triangle_count, -1)
+        NdotR = torch.mul(NdotR, normals).sum(-1) # (height, width, triangle_count)
+        NdotO = torch.mul(normals, camera_position).sum(-1) # (triangle_count)
+        d = - torch.mul(position_batches[:,0,:], normals).sum(-1)
+        ts = - (NdotO + d) / NdotR # (height, width, 1)
+        intersection_points = camera_position + (self.rays.permute(2,0,1) * ts.permute(2,0,1)).permute(1,2,0) # (height, width, 3)
+        
+        return
 
     def clear_buffer(self):
         self.screen_buffer.fill_(0)

@@ -26,11 +26,13 @@ if __name__ == '__main__':
     # print(screen_coords)
     while True:
         renderer.clear_buffer()
-        renderer.rasterize(scene.positions[1], scene.colors[1])
-        renderer.rasterize(scene.positions[0], scene.colors[0], 0)
-        # renderer.rasterize(scene.positions[1], scene.colors[1], 1)
+        # renderer.rasterize_screen(scene.positions[1], scene.colors[1])
+        # renderer.rasterize_screen(scene.positions[0], scene.colors[0], 0)
+        # renderer.rasterize_screen(scene.positions[1], scene.colors[1], 1)
 
-        # act as fragment shader
+        renderer.path_trace(position_batches=scene.world_triangle, attribute_batches=None, camera_position=scene.camera_position,
+                                 camera_front=scene.camera_direction, camera_right=scene.camera_right, camera_up=scene.camera_up)
+
 
         # display color and add fps
         color_buffer = renderer.get_buffer()
