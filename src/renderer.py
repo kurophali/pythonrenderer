@@ -105,21 +105,21 @@ class Renderer:
         v0s = position_batches[:,0,:]
         v1s = position_batches[:,1,:]
         v2s = position_batches[:,2,:]
-        v01s = (v1s - v0s).permute((0,2,1))
-        v02s = (v2s - v0s).permute((0,2,1))
+        v01s = (v1s - v0s)
+        v02s = (v2s - v0s)
         normals = torch.cross(v01s, v02s) # (triangle_count, 3)
         triangle_count = normals.shape[0]
         # t is stored in (screen_height, screen_width, triangle_count, 1)
         # w.i.p some constants can be moved to initialzer functions
         ray_offsets = self.screen_coords - 0.5
         # ??? this cartesian dot product should show you something
-        self.rays = camera_front + camera_up * ray_offsets[0] + camera_right * ray_offsets[1] # (height, width, 3)
+        self.rays = camera_front + camera_up * ray_offsets[:,:,0][:,:,None].expand((-1,-1,3)) + camera_right * ray_offsets[:,:,1][:,:,None].expand((-1,-1,3)) # (height, width, 3)
         NdotR = self.rays[:,:,None,:]
         NdotR = NdotR.expand(-1, -1, triangle_count, -1)
         NdotR = torch.mul(NdotR, normals).sum(-1) # (height, width, triangle_count)
         NdotO = torch.mul(normals, camera_position).sum(-1) # (triangle_count)
         d = - torch.mul(position_batches[:,0,:], normals).sum(-1)
-        ts = - (NdotO + d) / NdotR # (height, width, 1)
+        ts = - (NdotO + d) / NdotR # (height, width, 1) w.i.p. got bug here
         intersection_points = camera_position + (self.rays.permute(2,0,1) * ts.permute(2,0,1)).permute(1,2,0) # (height, width, 3)
         
         return
