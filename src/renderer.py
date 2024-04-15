@@ -152,7 +152,7 @@ class Renderer:
 
         v01 = triangles[:, 1, :] - triangles[:, 0, :]
         v02 = triangles[:, 2, :] - triangles[:, 0, :]
-        triangle_area_x2 = torch.linalg.vector_norm(torch.cross(v01, v02), 1)
+        triangle_area_x2 = torch.linalg.vector_norm(torch.cross(v01, v02), dim=1)
         outside = subtriangles_area_x2 - triangle_area_x2 - 1e-6 # when close to zero some values can be rounded up
         outside = torch.clamp(torch.sign(outside), 0, 1)
         inside = 1 - outside
