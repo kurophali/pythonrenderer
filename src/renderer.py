@@ -12,11 +12,13 @@ class Shader(torch.nn.Module):
 
 
 class Renderer:        
-    def __init__(self, width, height) -> None:
+    def __init__(self, width, height, max_triangle_batch_size,device) -> None:
+        self.device = device
         self.width = width
         self.height = height
-        self.color_buffer = torch.full((height, width, 3), 0.0)
-        self.screen_coords = torch.full((height, width, 3), 1.0)
+        self.max_triangle_batch_size = max_triangle_batch_size
+        self.color_buffer = torch.full((height, width, 3), 0.0, device=self.device)
+        self.screen_coords = torch.full((height, width, 3), 1.0, device=self.device)
         self.texel_size_x = 1 / width
         self.texel_size_y = 1 / height 
         self.screen_vertical_size = 1
@@ -24,7 +26,7 @@ class Renderer:
         # w.i.p. may need to adjust for odd and even sizes
         
 
-        self.rays = torch.full((height, width, 3), 1.0)
+        self.rays = torch.full((height, width, 3), 1.0, device=self.device)
         for height_idx in range(len(self.screen_coords)):
             for width_idx in range(len(self.screen_coords[0])):
                 self.screen_coords[height_idx, width_idx, 0] = self.texel_size_x * (width_idx + 1)
@@ -80,25 +82,24 @@ class Renderer:
         depth = interpolated_attributes[:,:,0].unsqueeze(-1)
         screen_depth = self.screen_coords[:,:,2].unsqueeze(-1)
 
-
         can_draw = torch.clamp(torch.sign(depth - screen_depth), 0, 1) * is_inside # draws closer one a.k.a larger depth so no need to 1 - tensor
         self.color_buffer = can_draw * interpolated_attributes[:,:,1:4] + (1-can_draw) * self.color_buffer
         self.color_buffer = can_draw * interpolated_attributes[:,:,1:4] + (1-can_draw) * self.color_buffer
         self.screen_coords[:,:,2] = (can_draw * depth + (1-can_draw) * screen_depth).reshape((constants.SCREEN_HEIGHT, constants.SCREEN_WIDTH))
-
+    
         # this is even slower
         # can_draw = torch.clamp(torch.sign(depth - screen_depth), 0, 1) * is_inside > 0
         # can_draw = can_draw.reshape(self.height, self.width)
         # self.color_buffer[can_draw] =  interpolated_attributes[can_draw][:,1:4]
         # self.screen_coords[can_draw][:,2] = depth[can_draw][:,0]
-
+    
         return (is_inside, interpolated_attributes[:,:,0], interpolated_attributes[:,:,1:])         
 
     def path_trace(self, triangle_batches: torch.Tensor, attribute_batches: torch.Tensor, 
                  camera_position: torch.Tensor, camera_front: torch.Tensor, camera_right: torch.Tensor, camera_up: torch.Tensor,
                  batch_id: Optional[int] = -1, near_plane_distance = 0.1):
         '''
-        solution comes from this blog 
+        collision detection solution comes from this blog 
         https://www.scratchapixel.com/lessons/3d-basic-rendering/ray-tracing-rendering-a-triangle/ray-triangle-intersection-geometric-solution.html
         assumes the vertical length of the screen is 1
         position_batches: (triangle_count, vertex_count, dim_count)
@@ -111,6 +112,7 @@ class Renderer:
         v02s = (v2s - v0s)
         normals = torch.cross(v01s, v02s) # (triangle_count, 3)
         triangle_count = normals.shape[0]
+        attribute_count = attribute_batches.shape[0]
         # t is stored in (screen_height, screen_width, triangle_count, 1)
         # pending... some constants can be moved to initialzer functions
         ray_offsets = self.screen_coords - 0.5
@@ -122,32 +124,41 @@ class Renderer:
         NdotO = torch.mul(normals, camera_position).sum(-1) # (triangle_count)
         d = - torch.mul(triangle_batches[:,0,:], normals).sum(-1)
         ts = - (NdotO + d) / NdotR # (height, width, triangle_count) 
-        ray_dirs = self.rays[:,:,None,:].expand(-1,-1,2,-1).permute(3,0,1,2) # to (dim, height, width, triangle_count)
+        ray_dirs = self.rays[:,:,None,:].expand(-1,-1,2,-1).permute(3,0,1,2) # (dim, height, width, triangle_count)
         intersection_points = camera_position + (ray_dirs * ts).permute(1,2,3,0)
-        inside = self.get_intersection_data(intersection_points, triangle_batches)
+        inside, interpolated_attributes = self.get_intersection_data(intersection_points, triangle_batches, attribute_batches)
         
-        # w.i.p. got bug when rendering multiple triangles. testing on screen
-        self.color_buffer = inside[:,:,0].unsqueeze(-1).expand((-1,-1,3)) * intersection_points[:,:,0,:]
-        # self.color_buffer = inside[:,:,0].unsqueeze(-1).expand((-1,-1,3))
-        # self.color_buffer = intersection_points[:,:,0,:]
-        # self.color_buffer = self.screen_coords.clamp(0,1)
-        # self.color_buffer = ray_offsets
-        
+        distance_to_camera = torch.linalg.vector_norm(intersection_points - camera_position, dim=3) # (h, w, t)
+        closest_triangle = torch.argmin(distance_to_camera, dim=2, keepdim=True) # (h, w)
+        interpolation_mask = torch.nn.functional.one_hot(closest_triangle, num_classes=self.max_triangle_batch_size) # (h, w, t)
+        interpolation_mask = interpolation_mask[:,:,:,None].expand(-1,-1,-1, attribute_count)
+        interpolated_attributes = interpolated_attributes * interpolation_mask
+        interpolated_attributes = torch.sum(interpolated_attributes, dim=2)
+        # front_triangle_attributes = torch.gather(interpolated_attributes, dim=2, index=closest_triangle) # (h, w, a)
+        # new_tensor = original_tensor[torch.arange(d0), indices.view(-1), :]
 
+        # ??? this is advanced indexing from gpt. very slow and not sure if it works
+        # front_triangle_attributes = interpolated_attributes[:,:,closest_triangle,:]
+        # front_triangle_attributes = front_triangle_attributes.squeeze(2).permute(0,1,3,2)
+
+        self.color_buffer = inside.sum(-1).clamp(0,1).unsqueeze(-1).expand((-1,-1,3)) * interpolated_attributes[:,:,:3]
+        self.color_buffer = inside[:,:,0].clamp(0,1).unsqueeze(-1).expand((-1,-1,3)) * interpolated_attributes[:,:,:3]
+        
         return inside
 
     def get_intersection_data(self, intersection_positions: torch.Tensor, # (h, w, triangle_count, 3)
                                triangles: torch.Tensor, # (triangle_count, 3, 3)
                                triangle_attributes: torch.Tensor = None # (triangle_count, 3, attribute_count)
                                ):
-        # triangle_count = triangles.shape[0]
+        triangle_count = triangles.shape[0]
+        attribute_count = triangle_attributes.shape[-1]
         # intersection_positions = intersection_positions[:,:,None,:].expand(-1,-1, triangle_count,-1)
         vp0 = triangles[:,0,:] - intersection_positions
         vp1 = triangles[:,1,:] - intersection_positions
         vp2 = triangles[:,2,:] - intersection_positions
-        vp01_area_x2 = torch.linalg.vector_norm(torch.cross(vp0, vp1), dim=3) 
-        vp02_area_x2 = torch.linalg.vector_norm(torch.cross(vp0, vp2), dim=3) 
-        vp12_area_x2 = torch.linalg.vector_norm(torch.cross(vp1, vp2), dim=3) 
+        vp01_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp0, vp1), dim=3) 
+        vp02_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp0, vp2), dim=3) 
+        vp12_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp1, vp2), dim=3) 
         subtriangles_area_x2 = vp01_area_x2 + vp02_area_x2 + vp12_area_x2
 
         v01 = triangles[:, 1, :] - triangles[:, 0, :]
@@ -156,13 +167,18 @@ class Renderer:
         outside = subtriangles_area_x2 - triangle_area_x2 - 1e-6 # when close to zero some values can be rounded up
         outside = torch.clamp(torch.sign(outside), 0, 1)
         inside = 1 - outside
+        attribute_weights = torch.cat((vp12_area_x2.unsqueeze(-1), vp02_area_x2.unsqueeze(-1), vp01_area_x2.unsqueeze(-1)), 3).permute(2, 3, 0, 1) 
+        attribute_weights = attribute_weights.reshape(triangle_count, 3, -1) # (t, 3, w * h)
+        interpolated_attributes = triangle_attributes.permute(0, 2, 1) # (t, a, 3)
+        interpolated_attributes = torch.bmm(interpolated_attributes, attribute_weights) # (t, a, h*w)
+        interpolated_attributes = interpolated_attributes.permute((2,0,1)).reshape((self.height, self.width, triangle_count, attribute_count)) # (h, w, t, a)
         
         # w0 = vp12_area_x2 / triangle_area_x2
         # w1 = vp02_area_x2 / triangle_area_x2
         # w2 = vp01_area_x2 / triangle_area_x2
 
         # frag_attributes = triangle_area_x2
-        return inside
+        return inside, interpolated_attributes
 
     def clear_buffer(self):
         self.color_buffer.fill_(0)
@@ -173,4 +189,4 @@ class Renderer:
         # return self.color_buffer.numpy()
 
     def get_buffer(self):
-        return self.color_buffer.numpy()
+        return self.color_buffer.cpu().numpy()

@@ -14,11 +14,10 @@ if __name__ == '__main__':
         if torch.backends.mps.is_available()
         else "cpu"
     )
-    if torch.cuda.is_available():
-        torch.set_default_device(device)
+    torch.set_default_device(device)
 
-    renderer: Renderer = Renderer(constants.SCREEN_WIDTH, constants.SCREEN_HEIGHT)
-    scene: Scene = Scene()
+    renderer: Renderer = Renderer(constants.SCREEN_WIDTH, constants.SCREEN_HEIGHT, device=device, max_triangle_batch_size=2)
+    scene: Scene = Scene(device=device)
 
     prev_frame_time = 0
     new_frame_time = 0
@@ -30,7 +29,7 @@ if __name__ == '__main__':
         # renderer.rasterize_screen(scene.positions[0], scene.colors[0], 0)
         # renderer.rasterize_screen(scene.positions[1], scene.colors[1], 1)
 
-        renderer.path_trace(triangle_batches=scene.world_triangle, attribute_batches=None, camera_position=scene.camera_position,
+        renderer.path_trace(triangle_batches=scene.world_triangle, attribute_batches=scene.colors, camera_position=scene.camera_position,
                                  camera_front=scene.camera_direction, camera_right=scene.camera_right, camera_up=scene.camera_up)
 
 
