@@ -30,7 +30,7 @@ if __name__ == '__main__':
         # renderer.rasterize_screen(scene.positions[0], scene.colors[0], 0)
         # renderer.rasterize_screen(scene.positions[1], scene.colors[1], 1)
 
-        renderer.path_trace(position_batches=scene.world_triangle, attribute_batches=None, camera_position=scene.camera_position,
+        renderer.path_trace(triangle_batches=scene.world_triangle, attribute_batches=None, camera_position=scene.camera_position,
                                  camera_front=scene.camera_direction, camera_right=scene.camera_right, camera_up=scene.camera_up)
 
 
