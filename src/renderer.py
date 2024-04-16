@@ -112,7 +112,7 @@ class Renderer:
         v02s = (v2s - v0s)
         normals = torch.cross(v01s, v02s) # (triangle_count, 3)
         triangle_count = normals.shape[0]
-        attribute_count = attribute_batches.shape[0]
+        attribute_count = attribute_batches.shape[-1]
         # t is stored in (screen_height, screen_width, triangle_count, 1)
         # pending... some constants can be moved to initialzer functions
         ray_offsets = self.screen_coords - 0.5
@@ -129,20 +129,23 @@ class Renderer:
         inside, interpolated_attributes = self.get_intersection_data(intersection_points, triangle_batches, attribute_batches)
         
         distance_to_camera = torch.linalg.vector_norm(intersection_points - camera_position, dim=3) # (h, w, t)
-        closest_triangle = torch.argmin(distance_to_camera, dim=2, keepdim=True) # (h, w)
-        interpolation_mask = torch.nn.functional.one_hot(closest_triangle, num_classes=self.max_triangle_batch_size) # (h, w, t)
-        interpolation_mask = interpolation_mask[:,:,:,None].expand(-1,-1,-1, attribute_count)
-        interpolated_attributes = interpolated_attributes * interpolation_mask
+        closest_plane = torch.argmin(distance_to_camera, dim=2, keepdim=True) # (h, w) w.i.p. !!! should convert to closest triangle with 'inside'
+        interpolation_mask = torch.nn.functional.one_hot(closest_plane, num_classes=self.max_triangle_batch_size)# (h, w, 1, t)
+        interpolation_mask = interpolation_mask.reshape(self.height, self.width, triangle_count, 1)
+        interpolation_mask = interpolation_mask.expand(-1,-1,-1, attribute_count)
+        interpolated_attributes = interpolation_mask * interpolated_attributes
         interpolated_attributes = torch.sum(interpolated_attributes, dim=2)
         # front_triangle_attributes = torch.gather(interpolated_attributes, dim=2, index=closest_triangle) # (h, w, a)
         # new_tensor = original_tensor[torch.arange(d0), indices.view(-1), :]
 
-        # ??? this is advanced indexing from gpt. very slow and not sure if it works
+        # ??? this is advanced indexing from gpt. very slow and not sure if it works. indexing is usually slower.
         # front_triangle_attributes = interpolated_attributes[:,:,closest_triangle,:]
         # front_triangle_attributes = front_triangle_attributes.squeeze(2).permute(0,1,3,2)
 
-        self.color_buffer = inside.sum(-1).clamp(0,1).unsqueeze(-1).expand((-1,-1,3)) * interpolated_attributes[:,:,:3]
-        self.color_buffer = inside[:,:,0].clamp(0,1).unsqueeze(-1).expand((-1,-1,3)) * interpolated_attributes[:,:,:3]
+        # self.color_buffer = inside.sum(-1).clamp(0,1).unsqueeze(-1).expand((-1,-1,3)) * interpolated_attributes[:,:,:3]
+        inside = inside.sum(-1).clamp(0,1).unsqueeze(-1).expand((-1,-1,3))
+        inside = inside[:,:,0].clamp(0,1).unsqueeze(-1).expand((-1,-1,3))
+        self.color_buffer = inside * interpolated_attributes[:,:,:3]
         
         return inside
 
@@ -183,10 +186,6 @@ class Renderer:
     def clear_buffer(self):
         self.color_buffer.fill_(0)
         self.screen_coords[:,:,2] = 0
-        # self.color_buffer[:,:,:] = self.screen_coords
-        # rasterized = self.rasterize_unoptimized(self.triangle)
-        # self.color_buffer[:,:,0] = rasterized
-        # return self.color_buffer.numpy()
 
     def get_buffer(self):
         return self.color_buffer.cpu().numpy()
