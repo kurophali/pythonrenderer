@@ -23,15 +23,16 @@ class Renderer:
         self.texel_size_y = 1 / height 
         self.screen_vertical_size = 1
         self.screen_unit_size = self.screen_vertical_size / self.height
-        # w.i.p. may need to adjust for odd and even sizes
-        
 
-        self.rays = torch.full((height, width, 3), 1.0, device=self.device)
+        # pending... may need to adjust for odd and even sizes
+        
         for height_idx in range(len(self.screen_coords)):
             for width_idx in range(len(self.screen_coords[0])):
                 self.screen_coords[height_idx, width_idx, 0] = self.texel_size_x * (width_idx + 1)
                 self.screen_coords[height_idx, width_idx, 1] = 1 - self.texel_size_y * (height_idx + 1)
-        # self.screen_coords = self.screen_coords.clamp(0,1)
+                
+        self.ray_offsets = self.screen_coords - 0.5
+
         if constants.DEBUG:
             print('================== uv.x ==================')
             print(self.screen_coords.numpy()[:,:,0])
@@ -96,7 +97,7 @@ class Renderer:
     
         return (is_inside, interpolated_attributes[:,:,0], interpolated_attributes[:,:,1:])         
 
-    def path_trace(self, triangle_batches: torch.Tensor, attribute_batches: torch.Tensor, 
+    def screen_space_path_trace(self, triangle_batches: torch.Tensor, attribute_batches: torch.Tensor, 
                  camera_position: torch.Tensor, camera_front: torch.Tensor, camera_right: torch.Tensor, camera_up: torch.Tensor,
                  batch_id: Optional[int] = -1, near_plane_distance = 0.1):
         '''
@@ -107,30 +108,40 @@ class Renderer:
         position_batches: (triangle_count, vertex_count, dim_count)
         attribute_batches: (triangle_count, vertex_count, attribute_count)
         '''
+        # # pending... some constants can be moved to initialzer functions
+        # # ??? this cartesian dot product should show you something
+        ray_dirs = camera_front + camera_up * self.ray_offsets[:,:,1][:,:,None].expand((-1,-1,3)) + camera_right * self.ray_offsets[:,:,0][:,:,None].expand((-1,-1,3)) # (height, width, 3)
+        inside, depth, selected_attributes = self.path_trace(ray_dirs=ray_dirs, ray_origin=camera_position, 
+            triangle_batches=triangle_batches, attribute_batches=attribute_batches)
+        # write to screen buffers
+        self.color_buffer = selected_attributes[:,:,:3]
+        self.screen_coords[:,:,2] = depth
+
+        return inside, depth, selected_attributes
+
+    def path_trace(self, ray_dirs: torch.Tensor, ray_origin: torch.Tensor, 
+                   triangle_batches: torch.Tensor, attribute_batches: torch.Tensor):
         v0s = triangle_batches[:,0,:]
         v1s = triangle_batches[:,1,:]
         v2s = triangle_batches[:,2,:]
         v01s = (v1s - v0s)
         v02s = (v2s - v0s)
+        
         normals = torch.cross(v01s, v02s) # (triangle_count, 3)
         triangle_count = normals.shape[0]
         attribute_count = attribute_batches.shape[-1]
-        # t is stored in (screen_height, screen_width, triangle_count, 1)
-        # pending... some constants can be moved to initialzer functions
-        ray_offsets = self.screen_coords - 0.5
-        # ??? this cartesian dot product should show you something
-        self.rays = camera_front + camera_up * ray_offsets[:,:,1][:,:,None].expand((-1,-1,3)) + camera_right * ray_offsets[:,:,0][:,:,None].expand((-1,-1,3)) # (height, width, 3)
-        NdotR = self.rays[:,:,None,:]
+
+        NdotR = ray_dirs[:,:,None,:]
         NdotR = NdotR.expand(-1, -1, triangle_count, -1)
         NdotR = torch.mul(NdotR, normals).sum(-1) # (height, width, triangle_count)
-        NdotO = torch.mul(normals, camera_position).sum(-1) # (triangle_count)
+        NdotO = torch.mul(normals, ray_origin).sum(-1) # (triangle_count)
         d = - torch.mul(triangle_batches[:,0,:], normals).sum(-1)
         ts = - (NdotO + d) / NdotR # (height, width, triangle_count) 
-        ray_dirs = self.rays[:,:,None,:].expand(-1,-1,2,-1).permute(3,0,1,2) # (dim, height, width, triangle_count)
-        intersection_points = camera_position + (ray_dirs * ts).permute(1,2,3,0)
+        ray_dirs = ray_dirs[:,:,None,:].expand(-1,-1,2,-1).permute(3,0,1,2) # (dim, height, width, triangle_count)
+        intersection_points = ray_origin + (ray_dirs * ts).permute(1,2,3,0)
         inside, interpolated_attributes = self.get_intersection_data(intersection_points, triangle_batches, attribute_batches)
         
-        distance_to_camera = torch.linalg.vector_norm(intersection_points - camera_position, dim=3) # (h, w, t)
+        distance_to_camera = torch.linalg.vector_norm(intersection_points - ray_origin, dim=3) # (h, w, t)
         closest_plane_orders = torch.argsort(distance_to_camera, dim=2) + 1 # 0 just means nothing is added (h, w, t)
         inside_orders = closest_plane_orders * inside # (h,w,t) only the orders that are inside kept its orders. others are 0.
         inside_orders[inside_orders == 0] = float('inf')
@@ -138,17 +149,13 @@ class Renderer:
         selected_ids[selected_ids == float('inf')] = 0
         selected_ids = selected_ids.to(torch.int64)
         masks = torch.nn.functional.one_hot(selected_ids, num_classes=triangle_count + 1)[:,:,1:] # got rid of that 0 that represents empty
-        depth = distance_to_camera * masks
-        depth = torch.sum(depth, dim=2)
+        hit_distances = distance_to_camera * masks
+        hit_distances = torch.sum(hit_distances, dim=2)
         masks = masks[:,:,:,None].expand((-1,-1,-1,attribute_count)) # (h, w, t, c)
         selected_attributes = masks * interpolated_attributes
         selected_attributes = selected_attributes.sum(dim=2) # bring that attribute to front
 
-        # write to screen buffers
-        self.color_buffer = selected_attributes[:,:,:3]
-        self.screen_coords[:,:,2] = depth
-
-        return inside, depth, selected_attributes
+        return inside, hit_distances, selected_attributes
 
     def get_intersection_data(self, intersection_positions: torch.Tensor, # (h, w, triangle_count, 3)
                                triangles: torch.Tensor, # (triangle_count, 3, 3)
