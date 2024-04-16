@@ -45,6 +45,7 @@ class Renderer:
             
     def rasterize_screen(self, positions: torch.Tensor, attributes: torch.Tensor, rasterization_id: Optional[int] = -1):
         ''' 
+        rasterize a single triangle on the screen buffers
         positions : (3,3) as (vertex_count, dim_count)
         attributes : (3, n) as (vertex_count, attribute_count)
         rasterizing is rather slow if i'm only using matmuls. can't think of a way to reduce overdraw 
@@ -99,6 +100,7 @@ class Renderer:
                  camera_position: torch.Tensor, camera_front: torch.Tensor, camera_right: torch.Tensor, camera_up: torch.Tensor,
                  batch_id: Optional[int] = -1, near_plane_distance = 0.1):
         '''
+        path trace a batch of triangles on to the screen buffers
         collision detection solution comes from this blog 
         https://www.scratchapixel.com/lessons/3d-basic-rendering/ray-tracing-rendering-a-triangle/ray-triangle-intersection-geometric-solution.html
         assumes the vertical length of the screen is 1
@@ -129,25 +131,24 @@ class Renderer:
         inside, interpolated_attributes = self.get_intersection_data(intersection_points, triangle_batches, attribute_batches)
         
         distance_to_camera = torch.linalg.vector_norm(intersection_points - camera_position, dim=3) # (h, w, t)
-        closest_plane = torch.argmin(distance_to_camera, dim=2, keepdim=True) # (h, w) w.i.p. !!! should convert to closest triangle with 'inside'
-        interpolation_mask = torch.nn.functional.one_hot(closest_plane, num_classes=self.max_triangle_batch_size)# (h, w, 1, t)
-        interpolation_mask = interpolation_mask.reshape(self.height, self.width, triangle_count, 1)
-        interpolation_mask = interpolation_mask.expand(-1,-1,-1, attribute_count)
-        interpolated_attributes = interpolation_mask * interpolated_attributes
-        interpolated_attributes = torch.sum(interpolated_attributes, dim=2)
-        # front_triangle_attributes = torch.gather(interpolated_attributes, dim=2, index=closest_triangle) # (h, w, a)
-        # new_tensor = original_tensor[torch.arange(d0), indices.view(-1), :]
+        closest_plane_orders = torch.argsort(distance_to_camera, dim=2) + 1 # 0 just means nothing is added (h, w, t)
+        inside_orders = closest_plane_orders * inside # (h,w,t) only the orders that are inside kept its orders. others are 0.
+        inside_orders[inside_orders == 0] = float('inf')
+        selected_ids, indices = torch.min(inside_orders, dim=2) # 0 if nothing is inside. the rest are idx+1. in (h,w).
+        selected_ids[selected_ids == float('inf')] = 0
+        selected_ids = selected_ids.to(torch.int64)
+        masks = torch.nn.functional.one_hot(selected_ids, num_classes=triangle_count + 1)[:,:,1:] # got rid of that 0 that represents empty
+        depth = distance_to_camera * masks
+        depth = torch.sum(depth, dim=2)
+        masks = masks[:,:,:,None].expand((-1,-1,-1,attribute_count)) # (h, w, t, c)
+        selected_attributes = masks * interpolated_attributes
+        selected_attributes = selected_attributes.sum(dim=2) # bring that attribute to front
 
-        # ??? this is advanced indexing from gpt. very slow and not sure if it works. indexing is usually slower.
-        # front_triangle_attributes = interpolated_attributes[:,:,closest_triangle,:]
-        # front_triangle_attributes = front_triangle_attributes.squeeze(2).permute(0,1,3,2)
+        # write to screen buffers
+        self.color_buffer = selected_attributes[:,:,:3]
+        self.screen_coords[:,:,2] = depth
 
-        # self.color_buffer = inside.sum(-1).clamp(0,1).unsqueeze(-1).expand((-1,-1,3)) * interpolated_attributes[:,:,:3]
-        inside = inside.sum(-1).clamp(0,1).unsqueeze(-1).expand((-1,-1,3))
-        inside = inside[:,:,0].clamp(0,1).unsqueeze(-1).expand((-1,-1,3))
-        self.color_buffer = inside * interpolated_attributes[:,:,:3]
-        
-        return inside
+        return inside, depth, selected_attributes
 
     def get_intersection_data(self, intersection_positions: torch.Tensor, # (h, w, triangle_count, 3)
                                triangles: torch.Tensor, # (triangle_count, 3, 3)
