@@ -30,7 +30,7 @@ class Renderer:
             for width_idx in range(len(self.screen_coords[0])):
                 self.screen_coords[height_idx, width_idx, 0] = self.texel_size_x * (width_idx + 1)
                 self.screen_coords[height_idx, width_idx, 1] = 1 - self.texel_size_y * (height_idx + 1)
-                
+
         self.ray_offsets = self.screen_coords - 0.5
 
         if constants.DEBUG:
@@ -55,7 +55,7 @@ class Renderer:
         # if equal then we're inside
         # triangle_area_x2= torch.abs(torch.det(torch.cat((triangle[0:2, 0:2], triangle[1:3, 0:2])).reshape(3,2,2)))
         attribute_size = attributes.shape[-1]
-        triangle_area_x2 = torch.abs(torch.det(positions[0:2, 0:2] - positions[1:3, 0:2]))
+        triangle_area_x2 = torch.abs(torch.det(positions[0:2, 0:2] - positions[1:3, 0:2])) # not implemented in mps
         attributes = torch.cat((positions[:,2].unsqueeze(-1), attributes), 1) # add depth
         v0s = self.screen_coords[:,:,:2] - positions[0,:2]
         v1s = self.screen_coords[:,:,:2] - positions[1,:2]
@@ -84,7 +84,7 @@ class Renderer:
         depth = interpolated_attributes[:,:,0].unsqueeze(-1)
         screen_depth = self.screen_coords[:,:,2].unsqueeze(-1)
 
-        can_draw = torch.clamp(torch.sign(depth - screen_depth), 0, 1) * is_inside # draws closer one a.k.a larger depth so no need to 1 - tensor
+        can_draw = torch.clamp(torch.sign(screen_depth - depth), 0, 1) * is_inside
         self.color_buffer = can_draw * interpolated_attributes[:,:,1:4] + (1-can_draw) * self.color_buffer
         self.color_buffer = can_draw * interpolated_attributes[:,:,1:4] + (1-can_draw) * self.color_buffer
         self.screen_coords[:,:,2] = (can_draw * depth + (1-can_draw) * screen_depth).reshape((constants.SCREEN_HEIGHT, constants.SCREEN_WIDTH))
@@ -114,8 +114,10 @@ class Renderer:
         inside, depth, selected_attributes = self.path_trace(ray_dirs=ray_dirs, ray_origin=camera_position, 
             triangle_batches=triangle_batches, attribute_batches=attribute_batches)
         # write to screen buffers
-        self.color_buffer = selected_attributes[:,:,:3]
-        self.screen_coords[:,:,2] = depth
+        depth_test_passed = self.screen_coords[:,:,2] > depth
+        depth_test_passed = depth_test_passed.unsqueeze(-1).expand(-1,-1,3).to(torch.float)
+        self.color_buffer = depth_test_passed * selected_attributes[:,:,:3] + (1-depth_test_passed) * self.color_buffer
+        # self.screen_coords[:,:,2]= torch.minimum(self.screen_coords[:,:,2], depth_test_passed)
 
         return inside, depth, selected_attributes
 
@@ -141,21 +143,22 @@ class Renderer:
         intersection_points = ray_origin + (ray_dirs * ts).permute(1,2,3,0)
         inside, interpolated_attributes = self.get_intersection_data(intersection_points, triangle_batches, attribute_batches)
         
-        distance_to_camera = torch.linalg.vector_norm(intersection_points - ray_origin, dim=3) # (h, w, t)
-        closest_plane_orders = torch.argsort(distance_to_camera, dim=2) + 1 # 0 just means nothing is added (h, w, t)
+        plane_distances = torch.linalg.vector_norm(intersection_points - ray_origin, dim=3) # (h, w, t)
+        closest_plane_orders = torch.argsort(plane_distances, dim=2) + 1 # 0 just means nothing is added (h, w, t)
         inside_orders = closest_plane_orders * inside # (h,w,t) only the orders that are inside kept its orders. others are 0.
         inside_orders[inside_orders == 0] = float('inf')
         selected_ids, indices = torch.min(inside_orders, dim=2) # 0 if nothing is inside. the rest are idx+1. in (h,w).
         selected_ids[selected_ids == float('inf')] = 0
         selected_ids = selected_ids.to(torch.int64)
         masks = torch.nn.functional.one_hot(selected_ids, num_classes=triangle_count + 1)[:,:,1:] # got rid of that 0 that represents empty
-        hit_distances = distance_to_camera * masks
-        hit_distances = torch.sum(hit_distances, dim=2)
+        triangle_distances = plane_distances * masks
+        triangle_distances = torch.sum(triangle_distances, dim=2)
+        triangle_distances[triangle_distances == 0] = float('inf')
         masks = masks[:,:,:,None].expand((-1,-1,-1,attribute_count)) # (h, w, t, c)
         selected_attributes = masks * interpolated_attributes
         selected_attributes = selected_attributes.sum(dim=2) # bring that attribute to front
 
-        return inside, hit_distances, selected_attributes
+        return inside, triangle_distances, selected_attributes
 
     def get_intersection_data(self, intersection_positions: torch.Tensor, # (h, w, triangle_count, 3)
                                triangles: torch.Tensor, # (triangle_count, 3, 3)
@@ -184,16 +187,11 @@ class Renderer:
         interpolated_attributes = torch.bmm(interpolated_attributes, attribute_weights) # (t, a, h*w)
         interpolated_attributes = interpolated_attributes.permute((2,0,1)).reshape((self.height, self.width, triangle_count, attribute_count)) # (h, w, t, a)
         
-        # w0 = vp12_area_x2 / triangle_area_x2
-        # w1 = vp02_area_x2 / triangle_area_x2
-        # w2 = vp01_area_x2 / triangle_area_x2
-
-        # frag_attributes = triangle_area_x2
         return inside, interpolated_attributes
 
     def clear_buffer(self):
         self.color_buffer.fill_(0)
-        self.screen_coords[:,:,2] = 0
+        self.screen_coords[:,:,2] = float('inf')
 
     def get_buffer(self):
         return self.color_buffer.cpu().numpy()

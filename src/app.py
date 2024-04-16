@@ -44,6 +44,17 @@ if __name__ == '__main__':
         cv2.putText(color_buffer, fps, (7, 70), font, 3, (100, 255, 0), 3, cv2.LINE_AA) 
         cv2.imshow('frame', color_buffer)
         # cv2.imshow(fps, color_buffer)
-        if cv2.waitKey(1) & 0xFF == ord('q') or constants.DEBUG: 
+        key = cv2.waitKey(1) & 0xFF 
+        movement_amount = 0.1
+        if key == ord('q') or constants.DEBUG: 
             break
+        elif key == ord('w'): #up
+            scene.camera_position += scene.camera_direction * movement_amount
+        elif key == ord('s'): #down 
+            scene.camera_position -= scene.camera_direction * movement_amount
+        elif key == ord('a'): #up
+            scene.camera_position -= scene.camera_right * movement_amount
+        elif key == ord('d'): #down 
+            scene.camera_position += scene.camera_right * movement_amount
+
     cv2.destroyAllWindows() 
