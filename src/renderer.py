@@ -111,8 +111,16 @@ class Renderer:
         # # pending... some constants can be moved to initialzer functions
         # # ??? this cartesian dot product should show you something
         ray_dirs = camera_front + camera_up * self.ray_offsets[:,:,1][:,:,None].expand((-1,-1,3)) + camera_right * self.ray_offsets[:,:,0][:,:,None].expand((-1,-1,3)) # (height, width, 3)
-        inside, depth, selected_attributes = self.path_trace(ray_dirs=ray_dirs, ray_origin=camera_position, 
+        ray_dirs = ray_dirs.reshape((-1, 3))
+        ray_origins = camera_position.reshape(1, 3).expand((self.height * self.width, -1))
+
+        inside, depth, selected_attributes = self.path_trace(ray_dirs=ray_dirs, ray_origins=ray_origins, 
             triangle_batches=triangle_batches, attribute_batches=attribute_batches)
+        
+        inside = inside.reshape((self.height, self.width, inside.shape[-1])) # (h, w, t)
+        depth = depth.reshape((self.height, self.width))
+        selected_attributes = selected_attributes.reshape((self.height, self.width, selected_attributes.shape[-1]))
+
         # write to screen buffers
         depth_test_passed = self.screen_coords[:,:,2] > depth
         depth_test_passed = depth_test_passed.unsqueeze(-1).expand(-1,-1,3).to(torch.float)
@@ -121,48 +129,54 @@ class Renderer:
 
         return inside, depth, selected_attributes
 
-    def path_trace(self, ray_dirs: torch.Tensor, ray_origin: torch.Tensor, 
-                   triangle_batches: torch.Tensor, attribute_batches: torch.Tensor):
+    def path_trace(self, ray_dirs: torch.Tensor, # (r, 3)
+                   ray_origins: torch.Tensor, # (r, 3)
+                   triangle_batches: torch.Tensor, # (t, 3, 3)
+                   attribute_batches: torch.Tensor): # (t, 3, a)
         v0s = triangle_batches[:,0,:]
         v1s = triangle_batches[:,1,:]
         v2s = triangle_batches[:,2,:]
         v01s = (v1s - v0s)
         v02s = (v2s - v0s)
         
-        normals = torch.cross(v01s, v02s) # (triangle_count, 3)
+        normals = torch.cross(v01s, v02s) # (t, 3)
         triangle_count = normals.shape[0]
         attribute_count = attribute_batches.shape[-1]
+        
+        # a lot of the following computations has to be done per triangle
+        ray_origins = ray_origins[:,None,:].expand(-1, triangle_count, -1) 
 
-        NdotR = ray_dirs[:,:,None,:]
-        NdotR = NdotR.expand(-1, -1, triangle_count, -1)
-        NdotR = torch.mul(NdotR, normals).sum(-1) # (height, width, triangle_count)
-        NdotO = torch.mul(normals, ray_origin).sum(-1) # (triangle_count)
-        d = - torch.mul(triangle_batches[:,0,:], normals).sum(-1)
-        ts = - (NdotO + d) / NdotR # (height, width, triangle_count) 
-        ray_dirs = ray_dirs[:,:,None,:].expand(-1,-1,2,-1).permute(3,0,1,2) # (dim, height, width, triangle_count)
-        intersection_points = ray_origin + (ray_dirs * ts).permute(1,2,3,0)
+        NdotR = ray_dirs[:,None,:]
+        NdotR = NdotR.expand(-1, triangle_count, -1) # (r, t, 3)
+        NdotR = torch.mul(NdotR, normals).sum(-1) # (r, t)
+        NdotO = torch.mul(normals, ray_origins).sum(-1) # (r, t)
+
+        d = - torch.mul(triangle_batches[:,0,:],  normals).sum(-1)
+        ts = - (NdotO + d) / NdotR # (r, t) 
+        ray_dirs = ray_dirs[:,None,:].expand(-1,2,-1).permute(2,0,1) # (3, r, t)
+        intersection_points = ray_origins + (ray_dirs * ts).permute(1,2,0)
         inside, interpolated_attributes = self.get_intersection_data(intersection_points, triangle_batches, attribute_batches)
         
-        plane_distances = torch.linalg.vector_norm(intersection_points - ray_origin, dim=3) # (h, w, t)
-        closest_plane_orders = torch.argsort(plane_distances, dim=2) + 1 # 0 just means nothing is added (h, w, t)
+        plane_distances = torch.linalg.vector_norm(intersection_points - ray_origins, dim=2) # (p, t)
+        closest_plane_orders = torch.argsort(plane_distances, dim=1) + 1 # 0 just means nothing is added (p, t)
         inside_orders = closest_plane_orders * inside # (h,w,t) only the orders that are inside kept its orders. others are 0.
         inside_orders[inside_orders == 0] = float('inf')
-        selected_ids, indices = torch.min(inside_orders, dim=2) # 0 if nothing is inside. the rest are idx+1. in (h,w).
+        selected_ids, indices = torch.min(inside_orders, dim=1) # 0 if nothing is inside. the rest are idx+1. in (p).
         selected_ids[selected_ids == float('inf')] = 0
         selected_ids = selected_ids.to(torch.int64)
-        masks = torch.nn.functional.one_hot(selected_ids, num_classes=triangle_count + 1)[:,:,1:] # got rid of that 0 that represents empty
+        masks = torch.nn.functional.one_hot(selected_ids, num_classes=triangle_count + 1)[:,1:] # got rid of that 0 that represents empty
         triangle_distances = plane_distances * masks
-        triangle_distances = torch.sum(triangle_distances, dim=2)
+        triangle_distances = torch.sum(triangle_distances, dim=1)
         triangle_distances[triangle_distances == 0] = float('inf')
-        masks = masks[:,:,:,None].expand((-1,-1,-1,attribute_count)) # (h, w, t, c)
+        masks = masks[:,:,None].expand((-1,-1,attribute_count)) # (h, t, c)
         selected_attributes = masks * interpolated_attributes
-        selected_attributes = selected_attributes.sum(dim=2) # bring that attribute to front
+        selected_attributes = selected_attributes.sum(dim=1) # bring that attribute to front
 
         return inside, triangle_distances, selected_attributes
 
-    def get_intersection_data(self, intersection_positions: torch.Tensor, # (h, w, triangle_count, 3)
-                               triangles: torch.Tensor, # (triangle_count, 3, 3)
-                               triangle_attributes: torch.Tensor = None # (triangle_count, 3, attribute_count)
+    def get_intersection_data(self, intersection_positions: torch.Tensor, # (p, t, 3)
+                               triangles: torch.Tensor, # (t, 3, 3)
+                               triangle_attributes: torch.Tensor = None # (t, 3, a)
                                ):
         triangle_count = triangles.shape[0]
         attribute_count = triangle_attributes.shape[-1]
@@ -170,9 +184,9 @@ class Renderer:
         vp0 = triangles[:,0,:] - intersection_positions
         vp1 = triangles[:,1,:] - intersection_positions
         vp2 = triangles[:,2,:] - intersection_positions
-        vp01_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp0, vp1), dim=3) 
-        vp02_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp0, vp2), dim=3) 
-        vp12_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp1, vp2), dim=3) 
+        vp01_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp0, vp1), dim=2) 
+        vp02_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp0, vp2), dim=2) 
+        vp12_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp1, vp2), dim=2) 
         subtriangles_area_x2 = vp01_area_x2 + vp02_area_x2 + vp12_area_x2
 
         v01 = triangles[:, 1, :] - triangles[:, 0, :]
@@ -181,11 +195,11 @@ class Renderer:
         outside = subtriangles_area_x2 - triangle_area_x2 - 1e-6 # when close to zero some values can be rounded up
         outside = torch.clamp(torch.sign(outside), 0, 1)
         inside = 1 - outside
-        attribute_weights = torch.cat((vp12_area_x2.unsqueeze(-1), vp02_area_x2.unsqueeze(-1), vp01_area_x2.unsqueeze(-1)), 3).permute(2, 3, 0, 1) 
+        attribute_weights = torch.cat((vp12_area_x2.unsqueeze(-1), vp02_area_x2.unsqueeze(-1), vp01_area_x2.unsqueeze(-1)), 2).permute(1, 2, 0) 
         attribute_weights = attribute_weights.reshape(triangle_count, 3, -1) # (t, 3, w * h)
         interpolated_attributes = triangle_attributes.permute(0, 2, 1) # (t, a, 3)
-        interpolated_attributes = torch.bmm(interpolated_attributes, attribute_weights) # (t, a, h*w)
-        interpolated_attributes = interpolated_attributes.permute((2,0,1)).reshape((self.height, self.width, triangle_count, attribute_count)) # (h, w, t, a)
+        interpolated_attributes = torch.bmm(interpolated_attributes, attribute_weights) # (t, a, p)
+        interpolated_attributes = interpolated_attributes.permute((2,0,1)).reshape((-1, triangle_count, attribute_count)) # (p, t, a)
         
         return inside, interpolated_attributes
 
