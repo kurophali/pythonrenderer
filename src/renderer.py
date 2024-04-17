@@ -139,7 +139,7 @@ class Renderer:
         v01s = (v1s - v0s)
         v02s = (v2s - v0s)
         
-        normals = torch.cross(v01s, v02s) # (t, 3)
+        normals = torch.linalg.cross(v01s, v02s) # (t, 3)
         triangle_count = normals.shape[0]
         attribute_count = attribute_batches.shape[-1]
         
@@ -184,14 +184,14 @@ class Renderer:
         vp0 = triangles[:,0,:] - intersection_positions
         vp1 = triangles[:,1,:] - intersection_positions
         vp2 = triangles[:,2,:] - intersection_positions
-        vp01_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp0, vp1), dim=2) 
-        vp02_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp0, vp2), dim=2) 
-        vp12_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.cross(vp1, vp2), dim=2) 
+        vp01_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.linalg.cross(vp0, vp1), dim=2) 
+        vp02_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.linalg.cross(vp0, vp2), dim=2) 
+        vp12_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.linalg.cross(vp1, vp2), dim=2) 
         subtriangles_area_x2 = vp01_area_x2 + vp02_area_x2 + vp12_area_x2
 
         v01 = triangles[:, 1, :] - triangles[:, 0, :]
         v02 = triangles[:, 2, :] - triangles[:, 0, :]
-        triangle_area_x2 = torch.linalg.vector_norm(torch.cross(v01, v02), dim=1)
+        triangle_area_x2 = torch.linalg.vector_norm(torch.linalg.cross(v01, v02), dim=1)
         outside = subtriangles_area_x2 - triangle_area_x2 - 1e-6 # when close to zero some values can be rounded up
         outside = torch.clamp(torch.sign(outside), 0, 1)
         inside = 1 - outside
