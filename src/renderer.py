@@ -187,7 +187,7 @@ class Renderer:
         vp01_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.linalg.cross(vp0, vp1), dim=2) 
         vp02_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.linalg.cross(vp0, vp2), dim=2) 
         vp12_area_x2: torch.Tensor = torch.linalg.vector_norm(torch.linalg.cross(vp1, vp2), dim=2) 
-        subtriangles_area_x2 = vp01_area_x2 + vp02_area_x2 + vp12_area_x2
+        subtriangles_area_x2 = vp01_area_x2 + vp02_area_x2 + vp12_area_x2 # got bug here. when close to parallel (p, t)
 
         v01 = triangles[:, 1, :] - triangles[:, 0, :]
         v02 = triangles[:, 2, :] - triangles[:, 0, :]
@@ -199,6 +199,7 @@ class Renderer:
         attribute_weights = attribute_weights.reshape(triangle_count, 3, -1) # (t, 3, w * h)
         interpolated_attributes = triangle_attributes.permute(0, 2, 1) # (t, a, 3)
         interpolated_attributes = torch.bmm(interpolated_attributes, attribute_weights) # (t, a, p)
+        interpolated_attributes = interpolated_attributes / subtriangles_area_x2.permute((1,0))[:,None,:].expand(-1, attribute_count, -1)
         interpolated_attributes = interpolated_attributes.permute((2,0,1)).reshape((-1, triangle_count, attribute_count)) # (p, t, a)
         
         return inside, interpolated_attributes
