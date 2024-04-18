@@ -48,13 +48,22 @@ if __name__ == '__main__':
         movement_amount = 0.1
         if key == ord('q') or constants.DEBUG: 
             break
-        elif key == ord('w'): #up
-            scene.camera_position += scene.camera_direction * movement_amount
-        elif key == ord('s'): #down 
-            scene.camera_position -= scene.camera_direction * movement_amount
-        elif key == ord('a'): #up
-            scene.camera_position -= scene.camera_right * movement_amount
-        elif key == ord('d'): #down 
-            scene.camera_position += scene.camera_right * movement_amount
-
+        elif key == ord('w'):
+            # scene.camera_position += scene.camera_direction * movement_amount
+            scene.move_camera_down(-movement_amount)
+        elif key == ord('s'):
+            # scene.camera_position -= scene.camera_direction * movement_amount
+            scene.move_camera_down(movement_amount)
+        elif key == ord('a'):
+            # scene.camera_position -= scene.camera_right * movement_amount
+            scene.move_camera_right(-movement_amount)
+        elif key == ord('d'):
+            # scene.camera_position += scene.camera_right * movement_amount
+            scene.move_camera_right(movement_amount)
+        elif key == ord('r'): 
+            # scene.camera_position += scene.camera_right * movement_amount
+            scene.move_camera_forward(movement_amount)
+        elif key == ord('f'): 
+            # scene.camera_position += scene.camera_right * movement_amount
+            scene.move_camera_backward(movement_amount)
     cv2.destroyAllWindows() 
